@@ -1,0 +1,27 @@
+[package]
+name = "textspec"
+version = "0.1.0"
+edition = "2021"
+description = "Clean hardware spec snapshot for sharing"
+authors = ["Thad Williams"]
+
+[[bin]]
+name = "textspec"
+path = "src/main.rs"
+
+[dependencies]
+sysinfo = "0.30"
+serde = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+wmi = "0.13"
+windows = { version = "0.54", features = [
+    "Win32_System_SystemInformation",
+    "Win32_Foundation",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
