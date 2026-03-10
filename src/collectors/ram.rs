@@ -6,18 +6,101 @@ pub fn collect() -> Vec<RamStick> {
 
 #[cfg(target_os = "windows")]
 fn collect_platform() -> Vec<RamStick> {
-    // WMI: SELECT * FROM Win32_PhysicalMemory
-    // Fields: DeviceLocator, Manufacturer, PartNumber, Capacity,
-    //         Speed, MemoryType, SMBIOSMemoryType
-    //
-    // Timings (CL, tRCD, tRP, tRAS) are NOT available via WMI.
-    // They require reading SPD data from the memory controller,
-    // which needs either a kernel driver or a tool like CPU-Z.
-    // We will expose them as None unless a future enhancement
-    // adds a privileged SPD reader.
-    //
-    // Stubbed pending WMI wiring.
-    vec![]
+    use wmi::{COMLibrary, WMIConnection};
+    use serde::Deserialize;
+
+    #[derive(Deserialize, Debug)]
+    #[serde(rename = "Win32_PhysicalMemory")]
+    #[serde(rename_all = "PascalCase")]
+    struct Win32PhysicalMemory {
+        device_locator: Option<String>,
+        bank_label: Option<String>,
+        manufacturer: Option<String>,
+        part_number: Option<String>,
+        capacity: Option<u64>,
+        speed: Option<u32>,
+        // SMBIOSMemoryType is the correct field for DDR generation
+        // MemoryType is often 0 on modern systems
+        s_m_b_i_o_s_memory_type: Option<u16>,
+        configured_clock_speed: Option<u32>,
+    }
+
+    let com = match COMLibrary::new() {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let wmi = match WMIConnection::new(com) {
+        Ok(w) => w,
+        Err(_) => return vec![],
+    };
+    let results: Vec<Win32PhysicalMemory> = match wmi.query() {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+
+    results.into_iter().map(|r| {
+        let capacity_mb = r.capacity.unwrap_or(0) / 1_048_576;
+        let speed_mhz = r.configured_clock_speed.or(r.speed);
+        let memory_type = smbios_memory_type(r.s_m_b_i_o_s_memory_type.unwrap_or(0));
+
+        // Combine BankLabel + DeviceLocator for a unique, readable slot label
+        // e.g. BankLabel="BANK 0", DeviceLocator="DIMM 1" → "BANK 0 / DIMM 1"
+        let slot = match (r.bank_label.as_deref(), r.device_locator.as_deref()) {
+            (Some(b), Some(d)) if b != d => Some(format!("{} / {}", b.trim(), d.trim())),
+            (_, Some(d)) => Some(d.trim().to_string()),
+            (Some(b), _) => Some(b.trim().to_string()),
+            _ => None,
+        };
+
+        // WMI sometimes returns hex manufacturer IDs (e.g. "80CE" for Samsung)
+        let manufacturer = r.manufacturer
+            .map(|s| s.trim().to_string())
+            .map(|s| resolve_manufacturer_id(&s))
+            .filter(|s| !s.is_empty() && s != "Unknown" && s != "Not Specified");
+
+        let part_number = r.part_number
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != "Unknown");
+
+        RamStick {
+            slot,
+            manufacturer,
+            part_number,
+            capacity_mb,
+            speed_mhz,
+            memory_type,
+            cas_latency: None,
+            trcd: None,
+            trp: None,
+            tras: None,
+        }
+    }).filter(|s| s.capacity_mb > 0).collect()
+}
+
+#[cfg(target_os = "windows")]
+fn smbios_memory_type(code: u16) -> Option<String> {
+    match code {
+        24 => Some("DDR3".into()),
+        26 => Some("DDR4".into()),
+        // DDR5 codes — 0x22 = 34 in some SMBIOS versions, 0x23 = 35 in others
+        34 | 35 => Some("DDR5".into()),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_manufacturer_id(raw: &str) -> String {
+    // WMI sometimes returns JEDEC bank/manufacturer hex IDs instead of names
+    match raw.to_uppercase().trim() {
+        "80CE" | "CE80" => "Samsung".into(),
+        "AD00" | "80AD" | "AD80" => "SK Hynix".into(),
+        "2C00" | "802C" | "2C80" => "Micron".into(),
+        "0198" | "9801" => "Kingston".into(),
+        "04CD" | "CD04" => "G.Skill".into(),
+        "0420" | "2004" => "Corsair".into(),
+        "1B85" | "851B" => "ADATA".into(),
+        other => other.to_string(),
+    }
 }
 
 #[cfg(target_os = "linux")]

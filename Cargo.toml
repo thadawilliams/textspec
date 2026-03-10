@@ -11,15 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 sysinfo = "0.30"
-serde = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
 wmi = "0.13"
-windows = { version = "0.54", features = [
-    "Win32_System_SystemInformation",
-    "Win32_Foundation",
-] }
+serde = { version = "1", features = ["derive"] }
 
 [profile.release]
 opt-level = 3

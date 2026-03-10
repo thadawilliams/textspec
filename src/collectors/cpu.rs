@@ -85,20 +85,32 @@ fn get_boost_clock() -> Option<f64> {
 
 // Cache sizes — platform specific
 #[cfg(target_os = "windows")]
-fn get_l2_cache_kb() -> Option<u64> { None } // TODO: WMI Win32_CacheMemory
-
-#[cfg(target_os = "linux")]
 fn get_l2_cache_kb() -> Option<u64> {
-    read_cache_size_linux("index2")
-}
-
-#[cfg(target_os = "macos")]
-fn get_l2_cache_kb() -> Option<u64> {
-    sysctl_cache_mac("hw.l2cachesize")
+    use wmi::{COMLibrary, WMIConnection};
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(rename = "Win32_Processor")]
+    #[serde(rename_all = "PascalCase")]
+    struct Win32Processor { l2_cache_size: Option<u32> }
+    let com = COMLibrary::new().ok()?;
+    let wmi = WMIConnection::new(com).ok()?;
+    let results: Vec<Win32Processor> = wmi.query().ok()?;
+    results.into_iter().next()?.l2_cache_size.map(|v| v as u64)
 }
 
 #[cfg(target_os = "windows")]
-fn get_l3_cache_kb() -> Option<u64> { None } // TODO: WMI Win32_CacheMemory
+fn get_l3_cache_kb() -> Option<u64> {
+    use wmi::{COMLibrary, WMIConnection};
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(rename = "Win32_Processor")]
+    #[serde(rename_all = "PascalCase")]
+    struct Win32Processor { l3_cache_size: Option<u32> }
+    let com = COMLibrary::new().ok()?;
+    let wmi = WMIConnection::new(com).ok()?;
+    let results: Vec<Win32Processor> = wmi.query().ok()?;
+    results.into_iter().next()?.l3_cache_size.map(|v| v as u64)
+}
 
 #[cfg(target_os = "linux")]
 fn get_l3_cache_kb() -> Option<u64> {

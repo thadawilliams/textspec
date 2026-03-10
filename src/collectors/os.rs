@@ -1,12 +1,11 @@
 use sysinfo::System;
 use crate::models::OsInfo;
 
-pub fn collect(sys: &System) -> Option<OsInfo> {
+pub fn collect(_sys: &System) -> Option<OsInfo> {
     let name = System::long_os_version()?;
-    let version = System::os_version().unwrap_or_default();
     let build = get_build_number();
 
-    Some(OsInfo { name, version, build })
+    Some(OsInfo { name, build })
 }
 
 #[cfg(target_os = "windows")]

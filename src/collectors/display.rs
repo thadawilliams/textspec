@@ -6,10 +6,96 @@ pub fn collect() -> Vec<DisplayInfo> {
 
 #[cfg(target_os = "windows")]
 fn collect_platform() -> Vec<DisplayInfo> {
-    // WMI: SELECT * FROM Win32_DesktopMonitor  (limited - often misses refresh rate)
-    // Better: EnumDisplayDevices + EnumDisplaySettings via windows crate
-    // TODO: windows crate wiring
-    vec![]
+    use std::process::Command;
+
+    // Single PowerShell script that gets everything:
+    // resolution + refresh via EnumDisplaySettings, friendly name via WMI
+    let script = r#"
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class Display {
+    [DllImport("user32.dll")] public static extern bool EnumDisplayDevices(string lpDevice, uint iDevNum, ref DISPLAY_DEVICE lpDisplayDevice, uint dwFlags);
+    [DllImport("user32.dll")] public static extern bool EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Ansi)]
+    public struct DISPLAY_DEVICE {
+        public int cb;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string DeviceName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string DeviceString;
+        public int StateFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string DeviceID;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string DeviceKey;
+    }
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Ansi)]
+    public struct DEVMODE {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string dmDeviceName;
+        public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+        public int dmFields, dmPositionX, dmPositionY, dmDisplayOrientation, dmDisplayFixedOutput;
+        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string dmFormName;
+        public short dmLogPixels; public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+    }
+}
+"@
+
+$i = 0
+while ($true) {
+    $dev = New-Object Display+DISPLAY_DEVICE
+    $dev.cb = [System.Runtime.InteropServices.Marshal]::SizeOf($dev)
+    if (-not [Display]::EnumDisplayDevices($null, $i, [ref]$dev, 0)) { break }
+    $i++
+    # StateFlags: 1=attached, 4=primary. Skip non-attached
+    if (($dev.StateFlags -band 1) -eq 0) { continue }
+    $isPrimary = if (($dev.StateFlags -band 4) -ne 0) { "1" } else { "0" }
+
+    $mode = New-Object Display+DEVMODE
+    $mode.dmSize = [System.Runtime.InteropServices.Marshal]::SizeOf($mode)
+    [Display]::EnumDisplaySettings($dev.DeviceName, -1, [ref]$mode) | Out-Null
+
+    # Get friendly monitor name from the monitor sub-device
+    $mon = New-Object Display+DISPLAY_DEVICE
+    $mon.cb = [System.Runtime.InteropServices.Marshal]::SizeOf($mon)
+    $friendlyName = $dev.DeviceName
+    if ([Display]::EnumDisplayDevices($dev.DeviceName, 0, [ref]$mon, 0)) {
+        if ($mon.DeviceString -and $mon.DeviceString -ne "Generic Monitor") {
+            $friendlyName = $mon.DeviceString
+        }
+    }
+
+    Write-Output "$isPrimary|$friendlyName|$($mode.dmPelsWidth)|$($mode.dmPelsHeight)|$($mode.dmDisplayFrequency)"
+}
+"#;
+
+    let output = match Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return vec![],
+    };
+
+    let text = String::from_utf8(output.stdout).unwrap_or_default();
+    let mut displays = vec![];
+
+    for line in text.lines() {
+        let parts: Vec<&str> = line.trim().split('|').collect();
+        if parts.len() < 5 { continue; }
+
+        let is_primary = parts[0] == "1";
+        let name = parts[1].trim().to_string();
+        let w: u32 = parts[2].parse().unwrap_or(0);
+        let h: u32 = parts[3].parse().unwrap_or(0);
+        let refresh: f64 = parts[4].parse().unwrap_or(0.0);
+
+        displays.push(DisplayInfo {
+            name: if name.is_empty() { None } else { Some(name) },
+            resolution_w: w,
+            resolution_h: h,
+            refresh_rate_hz: if refresh > 0.0 { Some(refresh) } else { None },
+            is_primary,
+        });
+    }
+    displays
 }
 
 #[cfg(target_os = "linux")]

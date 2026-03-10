@@ -87,6 +87,5 @@ pub enum StorageType {
 #[derive(Debug, Default)]
 pub struct OsInfo {
     pub name: String,           // e.g. "Windows 11 Pro"
-    pub version: String,
     pub build: Option<String>,
 }

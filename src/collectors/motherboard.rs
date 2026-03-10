@@ -6,17 +6,49 @@ pub fn collect() -> Option<MotherboardInfo> {
 
 #[cfg(target_os = "windows")]
 fn collect_platform() -> Option<MotherboardInfo> {
-    // WMI queries:
-    //   Win32_BaseBoard  → Manufacturer, Product (model)
-    //   Win32_BIOS       → Manufacturer, SMBIOSBIOSVersion, ReleaseDate
-    //
-    // Full WMI wiring will go here once the wmi crate integration is added.
-    // Stubbed for now — returns None so the binary still compiles and runs.
-    //
-    // Example WMI query pattern (pseudo):
-    //   let wmi_con = WMIConnection::new(...)?;
-    //   let results: Vec<Win32BaseBoard> = wmi_con.query()?;
-    None
+    use wmi::{COMLibrary, WMIConnection};
+    use serde::Deserialize;
+
+    #[derive(Deserialize, Debug)]
+    #[serde(rename = "Win32_BaseBoard")]
+    #[serde(rename_all = "PascalCase")]
+    struct Win32BaseBoard {
+        manufacturer: Option<String>,
+        product: Option<String>,
+    }
+
+    #[derive(Deserialize, Debug)]
+    #[serde(rename = "Win32_BIOS")]
+    #[serde(rename_all = "PascalCase")]
+    struct Win32Bios {
+        manufacturer: Option<String>,
+        s_m_b_i_o_s_b_i_o_s_version: Option<String>,
+        release_date: Option<String>,
+    }
+
+    let com = COMLibrary::new().ok()?;
+    let wmi = WMIConnection::new(com).ok()?;
+
+    let boards: Vec<Win32BaseBoard> = wmi.query().ok()?;
+    let board = boards.into_iter().next()?;
+
+    let bioses: Vec<Win32Bios> = wmi.query().ok()?;
+    let bios = bioses.into_iter().next();
+
+    // WMI returns BIOS date as "20230101000000.000000+000" — trim to readable
+    let bios_date = bios.as_ref()
+        .and_then(|b| b.release_date.as_deref())
+        .and_then(|d| if d.len() >= 8 {
+            Some(format!("{}-{}-{}", &d[0..4], &d[4..6], &d[6..8]))
+        } else { None });
+
+    Some(MotherboardInfo {
+        manufacturer: board.manufacturer.unwrap_or_default(),
+        model: board.product.unwrap_or_default(),
+        bios_vendor: bios.as_ref().and_then(|b| b.manufacturer.clone()),
+        bios_version: bios.as_ref().and_then(|b| b.s_m_b_i_o_s_b_i_o_s_version.clone()),
+        bios_date,
+    })
 }
 
 #[cfg(target_os = "linux")]
