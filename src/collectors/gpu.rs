@@ -63,72 +63,43 @@ fn collect_platform() -> Vec<GpuInfo> {
 /// Query DXGI for accurate VRAM — returns Vec of (adapter_name, vram_mb)
 #[cfg(target_os = "windows")]
 fn get_dxgi_vram() -> Vec<(String, u64)> {
-    use std::process::Command;
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory, IDXGIFactory};
 
-    let script = r#"
-Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
+    let mut results = Vec::new();
 
-[ComImport, Guid("aec22fb8-76f3-4639-9be0-28eb43a67a2e"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-interface IDXGIObject { void SetPrivateData(); void SetPrivateDataInterface(); void GetPrivateData(); void GetParent(); }
-
-[ComImport, Guid("2411e7e1-12ac-4ccf-bd14-9798e8534dc0"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-interface IDXGIAdapter { void EnumOutputs(); void CheckInterfaceSupport(); 
-    [PreserveSig] int GetDesc([Out] out DXGI_ADAPTER_DESC desc); }
-
-[ComImport, Guid("7b7166ec-21c7-44ae-b21a-c9ae321ae369"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-interface IDXGIFactory { 
-    void MakeWindowAssociation(); void GetWindowAssociation(); void CreateSwapChain(); void CreateSoftwareAdapter();
-    [PreserveSig] int EnumAdapters(uint index, out IDXGIAdapter adapter); }
-
-[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
-public struct DXGI_ADAPTER_DESC {
-    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string Description;
-    public uint VendorId, DeviceId, SubSysId, Revision;
-    public IntPtr DedicatedVideoMemory, DedicatedSystemMemory, SharedSystemMemory;
-    public long AdapterLuid;
-}
-
-public class DXGI {
-    [DllImport("dxgi.dll")] public static extern int CreateDXGIFactory(ref Guid riid, out IDXGIFactory ppFactory);
-}
-"@
-
-$iid = [Guid]"7b7166ec-21c7-44ae-b21a-c9ae321ae369"
-$factory = $null
-[DXGI]::CreateDXGIFactory([ref]$iid, [ref]$factory) | Out-Null
-
-$i = 0
-while ($true) {
-    $adapter = $null
-    $hr = $factory.EnumAdapters($i, [ref]$adapter)
-    if ($hr -ne 0) { break }
-    $desc = New-Object DXGI_ADAPTER_DESC
-    $adapter.GetDesc([ref]$desc) | Out-Null
-    $vramMB = [long]$desc.DedicatedVideoMemory / 1MB
-    Write-Output "$($desc.Description)|$vramMB"
-    $i++
-}
-"#;
-
-    let output = match Command::new("powershell")
-        .args(["-NoProfile", "-Command", script])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return vec![],
+    let factory: IDXGIFactory = match unsafe { CreateDXGIFactory() } {
+        Ok(f) => f,
+        Err(_) => return results,
     };
 
-    let text = String::from_utf8(output.stdout).unwrap_or_default();
-    text.lines()
-        .filter_map(|line| {
-            let mut parts = line.trim().splitn(2, '|');
-            let name = parts.next()?.trim().to_string();
-            let mb: u64 = parts.next()?.trim().parse().ok()?;
-            if mb > 0 { Some((name, mb)) } else { None }
-        })
-        .collect()
+    let mut i = 0u32;
+    loop {
+        let adapter = match unsafe { factory.EnumAdapters(i) } {
+            Ok(a) => a,
+            Err(_) => break,
+        };
+        i += 1;
+
+        let desc = match unsafe { adapter.GetDesc() } {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        // Description is a null-terminated UTF-16 array
+        let name_utf16: Vec<u16> = desc.Description.iter()
+            .map(|&c| c as u16)
+            .take_while(|&c| c != 0)
+            .collect();
+        let name = String::from_utf16_lossy(&name_utf16);
+
+        let vram_bytes = desc.DedicatedVideoMemory;
+        let vram_mb = vram_bytes as u64 / (1024 * 1024);
+
+        if vram_mb > 0 {
+            results.push((name, vram_mb));
+        }
+    }
+    results
 }
 
 #[cfg(target_os = "windows")]
