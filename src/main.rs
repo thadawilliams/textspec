@@ -58,6 +58,53 @@ fn main() {
     if cli.copy {
         copy_to_clipboard(&text);
     }
+
+    // If launched by double-clicking from Explorer (no parent console),
+    // pause so the user can read the output before the window closes.
+    #[cfg(target_os = "windows")]
+    if launched_from_explorer() {
+        eprintln!("\nPress Enter to close...");
+        let mut input = String::new();
+        let _ = std::io::stdin().read_line(&mut input);
+    }
+}
+
+/// Returns true if the process was launched by double-clicking in Explorer
+/// rather than from an existing terminal session.
+/// Detects this by checking if the parent process is explorer.exe.
+#[cfg(target_os = "windows")]
+fn launched_from_explorer() -> bool {
+    use std::process::Command;
+    // Get our own PID
+    let our_pid = std::process::id();
+    // Ask WMIC for our parent PID
+    let output = Command::new("wmic")
+        .args(["process", "where", &format!("ProcessId={}", our_pid),
+               "get", "ParentProcessId", "/value"])
+        .output();
+    let parent_pid_str = match output {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+        Err(_) => return false,
+    };
+    let parent_pid: u32 = parent_pid_str
+        .lines()
+        .find(|l| l.starts_with("ParentProcessId="))
+        .and_then(|l| l.split('=').nth(1))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+
+    if parent_pid == 0 { return false; }
+
+    // Check if that parent is explorer.exe
+    let output = Command::new("wmic")
+        .args(["process", "where", &format!("ProcessId={}", parent_pid),
+               "get", "Name", "/value"])
+        .output();
+    let parent_name = match output {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+        Err(_) => return false,
+    };
+    parent_name.to_lowercase().contains("explorer.exe")
 }
 
 fn copy_to_clipboard(text: &str) {
