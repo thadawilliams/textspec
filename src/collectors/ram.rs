@@ -38,29 +38,33 @@ fn collect_platform() -> Vec<RamStick> {
         Err(_) => return vec![],
     };
 
-    results.into_iter().map(|r| {
+    let mut sticks: Vec<RamStick> = results.into_iter().map(|r| {
         let capacity_mb = r.capacity.unwrap_or(0) / 1_048_576;
         let speed_mhz = r.configured_clock_speed.or(r.speed);
         let memory_type = smbios_memory_type(r.s_m_b_i_o_s_memory_type.unwrap_or(0));
 
-        // Combine BankLabel + DeviceLocator for a unique, readable slot label
-        // e.g. BankLabel="BANK 0", DeviceLocator="DIMM 1" → "BANK 0 / DIMM 1"
         let slot = match (r.bank_label.as_deref(), r.device_locator.as_deref()) {
-            (Some(b), Some(d)) if b != d => Some(format!("{} / {}", b.trim(), d.trim())),
+            (Some(b), Some(d)) if b.trim() != d.trim() => Some(format!("{} / {}", b.trim(), d.trim())),
             (_, Some(d)) => Some(d.trim().to_string()),
             (Some(b), _) => Some(b.trim().to_string()),
             _ => None,
         };
 
-        // WMI sometimes returns hex manufacturer IDs (e.g. "80CE" for Samsung)
         let manufacturer = r.manufacturer
             .map(|s| s.trim().to_string())
             .map(|s| resolve_manufacturer_id(&s))
-            .filter(|s| !s.is_empty() && s != "Unknown" && s != "Not Specified");
+            .filter(|s| {
+                let l = s.to_lowercase();
+                !s.is_empty()
+                    && l != "unknown"
+                    && l != "not specified"
+                    && l != "not available"
+                    && l != "jedec"
+            });
 
         let part_number = r.part_number
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty() && s != "Unknown");
+            .filter(|s| !s.is_empty() && s.to_lowercase() != "unknown");
 
         RamStick {
             slot,
@@ -74,32 +78,78 @@ fn collect_platform() -> Vec<RamStick> {
             trp: None,
             tras: None,
         }
-    }).filter(|s| s.capacity_mb > 0).collect()
+    }).filter(|s| s.capacity_mb > 0).collect();
+
+    // If multiple sticks share the same slot label (firmware limitation),
+    // append a counter to distinguish them e.g. "DIMM 1 (1)", "DIMM 1 (2)"
+    let mut slot_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for stick in &sticks {
+        let key = stick.slot.clone().unwrap_or_default();
+        *slot_counts.entry(key).or_insert(0) += 1;
+    }
+    let mut slot_seen: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for stick in &mut sticks {
+        let key = stick.slot.clone().unwrap_or_default();
+        if slot_counts.get(&key).copied().unwrap_or(0) > 1 {
+            let count = slot_seen.entry(key.clone()).or_insert(0);
+            *count += 1;
+            stick.slot = Some(format!("{} ({})", key, count));
+        }
+    }
+    sticks
 }
 
 #[cfg(target_os = "windows")]
 fn smbios_memory_type(code: u16) -> Option<String> {
     match code {
+        15 => Some("DDR".into()),
+        18 => Some("DDR2".into()),
+        20 => Some("DDR2 FB-DIMM".into()),
         24 => Some("DDR3".into()),
         26 => Some("DDR4".into()),
-        // DDR5 codes — 0x22 = 34 in some SMBIOS versions, 0x23 = 35 in others
+        27 => Some("LPDDR".into()),
+        28 => Some("LPDDR2".into()),
+        29 => Some("LPDDR3".into()),
+        30 => Some("LPDDR4".into()),
         34 | 35 => Some("DDR5".into()),
-        _ => None,
+        36 => Some("LPDDR5".into()),
+        _  => None,
     }
 }
 
 #[cfg(target_os = "windows")]
 fn resolve_manufacturer_id(raw: &str) -> String {
-    // WMI sometimes returns JEDEC bank/manufacturer hex IDs instead of names
-    match raw.to_uppercase().trim() {
-        "80CE" | "CE80" => "Samsung".into(),
-        "AD00" | "80AD" | "AD80" => "SK Hynix".into(),
-        "2C00" | "802C" | "2C80" => "Micron".into(),
-        "0198" | "9801" => "Kingston".into(),
-        "04CD" | "CD04" => "G.Skill".into(),
-        "0420" | "2004" => "Corsair".into(),
-        "1B85" | "851B" => "ADATA".into(),
-        other => other.to_string(),
+    // WMI returns JEDEC manufacturer IDs as hex strings on some systems.
+    // If it already looks like a real name (contains letters beyond hex),
+    // pass it through directly.
+    let upper = raw.to_uppercase();
+    let trimmed = upper.trim();
+
+    // Detect if it's a hex ID: all chars are 0-9, A-F, spaces
+    let is_hex = trimmed.chars().all(|c| c.is_ascii_hexdigit() || c == ' ');
+    if !is_hex && trimmed.len() > 4 {
+        return raw.trim().to_string();
+    }
+
+    match trimmed {
+        "80CE" | "CE80" | "CE00" | "00CE" => "Samsung".into(),
+        "AD00" | "80AD" | "AD80" | "00AD" => "SK Hynix".into(),
+        "2C00" | "802C" | "2C80" | "002C" => "Micron".into(),
+        "0198" | "9801"                   => "Kingston".into(),
+        "04CD" | "CD04"                   => "G.Skill".into(),
+        "0420" | "2004"                   => "Corsair".into(),
+        "1B85" | "851B"                   => "ADATA".into(),
+        "1A5D" | "5D1A"                   => "TeamGroup".into(),
+        "1551" | "5115"                   => "Patriot".into(),
+        "04E6" | "E604"                   => "PNY".into(),
+        "048F" | "8F04"                   => "Transcend".into(),
+        "04B3" | "B304"                   => "Ramaxel".into(),
+        "0194" | "9401"                   => "Smart".into(),
+        "013F" | "3F01"                   => "Apacer".into(),
+        "04F1" | "F104"                   => "Unifosa".into(),
+        "02FE" | "FE02"                   => "Elpida".into(),
+        "0543" | "4305"                   => "Qimonda".into(),
+        other                             => other.to_string(),
     }
 }
 

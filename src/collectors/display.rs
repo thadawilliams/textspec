@@ -8,70 +8,105 @@ pub fn collect() -> Vec<DisplayInfo> {
 fn collect_platform() -> Vec<DisplayInfo> {
     use std::process::Command;
 
-    // Single PowerShell script that gets everything:
-    // resolution + refresh via EnumDisplaySettings, friendly name via WMI
+    // Strategy:
+    // 1. QueryDisplayConfig gives us paths in display order with TargetID and accurate refresh rate
+    // 2. Each TargetID matches a UID{n} suffix in the DISPLAY registry keys
+    // 3. We read the EDID name from that registry key
+    // 4. AllScreens gives us resolution and primary flag, indexed by sourceInfo.id
     let script = r#"
-Add-Type -TypeDefinition @"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
-public class Display {
-    [DllImport("user32.dll")] public static extern bool EnumDisplayDevices(string lpDevice, uint iDevNum, ref DISPLAY_DEVICE lpDisplayDevice, uint dwFlags);
-    [DllImport("user32.dll")] public static extern bool EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
-    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Ansi)]
-    public struct DISPLAY_DEVICE {
-        public int cb;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string DeviceName;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string DeviceString;
-        public int StateFlags;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string DeviceID;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string DeviceKey;
+public class QDC {
+    [DllImport("user32.dll")] public static extern int GetDisplayConfigBufferSizes(uint f, out uint np, out uint nm);
+    [DllImport("user32.dll")] public static extern int QueryDisplayConfig(uint f, ref uint np, [Out] PATH[] paths, ref uint nm, [Out] MODE[] modes, IntPtr tid);
+    [StructLayout(LayoutKind.Sequential)] public struct PATH {
+        public SRC src; public TGT tgt; public uint flags;
     }
-    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Ansi)]
-    public struct DEVMODE {
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string dmDeviceName;
-        public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
-        public int dmFields, dmPositionX, dmPositionY, dmDisplayOrientation, dmDisplayFixedOutput;
-        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string dmFormName;
-        public short dmLogPixels; public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+    [StructLayout(LayoutKind.Sequential)] public struct SRC {
+        public LUID adapter; public uint id; public uint modeIdx; public uint status;
+    }
+    [StructLayout(LayoutKind.Sequential)] public struct TGT {
+        public LUID adapter; public uint id; public uint modeIdx;
+        public uint tech; public uint rot; public uint scale;
+        public RAT refresh; public uint scanline; public bool avail; public uint status;
+    }
+    [StructLayout(LayoutKind.Sequential)] public struct RAT { public uint N; public uint D; }
+    [StructLayout(LayoutKind.Sequential)] public struct LUID { public uint Lo; public int Hi; }
+    [StructLayout(LayoutKind.Sequential)] public struct MODE {
+        public uint infoType; public uint id; public LUID adapter;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst=64)] public byte[] data;
     }
 }
-"@
+'@
 
-$i = 0
-while ($true) {
-    $dev = New-Object Display+DISPLAY_DEVICE
-    $dev.cb = [System.Runtime.InteropServices.Marshal]::SizeOf($dev)
-    if (-not [Display]::EnumDisplayDevices($null, $i, [ref]$dev, 0)) { break }
-    $i++
-    # StateFlags: 1=attached, 4=primary. Skip non-attached
-    if (($dev.StateFlags -band 1) -eq 0) { continue }
-    $isPrimary = if (($dev.StateFlags -band 4) -ne 0) { "1" } else { "0" }
-
-    $mode = New-Object Display+DEVMODE
-    $mode.dmSize = [System.Runtime.InteropServices.Marshal]::SizeOf($mode)
-    [Display]::EnumDisplaySettings($dev.DeviceName, -1, [ref]$mode) | Out-Null
-
-    # Get friendly monitor name from the monitor sub-device
-    $mon = New-Object Display+DISPLAY_DEVICE
-    $mon.cb = [System.Runtime.InteropServices.Marshal]::SizeOf($mon)
-    $friendlyName = $dev.DeviceName
-    if ([Display]::EnumDisplayDevices($dev.DeviceName, 0, [ref]$mon, 0)) {
-        if ($mon.DeviceString -and $mon.DeviceString -ne "Generic Monitor") {
-            $friendlyName = $mon.DeviceString
+# Build UID -> EDID name map from registry
+$uidNameMap = @{}
+$dispKeys = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY" -ErrorAction SilentlyContinue
+foreach ($mfr in $dispKeys) {
+    $mfrName = $mfr.PSChildName
+    $instances = Get-ChildItem $mfr.PSPath -ErrorAction SilentlyContinue
+    foreach ($inst in $instances) {
+        if ($inst.PSChildName -match "UID(\d+)") {
+            $uid = [int]$matches[1]
+            $regPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY\$mfrName\$($inst.PSChildName)\Device Parameters"
+            $edid = (Get-ItemProperty $regPath -ErrorAction SilentlyContinue).EDID
+            if (-not $edid) { continue }
+            for ($i = 54; $i -le 108; $i += 18) {
+                if ($edid[$i] -eq 0 -and $edid[$i+1] -eq 0 -and $edid[$i+2] -eq 0 -and $edid[$i+3] -eq 0xFC) {
+                    $name = [System.Text.Encoding]::ASCII.GetString($edid[($i+5)..($i+17)]).Trim()
+                    $uidNameMap[$uid] = $name
+                    break
+                }
+            }
         }
     }
+}
 
-    Write-Output "$isPrimary|$friendlyName|$($mode.dmPelsWidth)|$($mode.dmPelsHeight)|$($mode.dmDisplayFrequency)"
+# QueryDisplayConfig for authoritative path order, TargetID, and refresh rate
+$np = 0; $nm = 0
+[QDC]::GetDisplayConfigBufferSizes(2, [ref]$np, [ref]$nm) | Out-Null
+$paths = New-Object QDC+PATH[] $np
+$modes = New-Object QDC+MODE[] $nm
+[QDC]::QueryDisplayConfig(2, [ref]$np, $paths, [ref]$nm, $modes, [IntPtr]::Zero) | Out-Null
+
+$screens = [System.Windows.Forms.Screen]::AllScreens
+
+foreach ($path in $paths) {
+    $srcIdx  = $path.src.id                   # matches AllScreens index
+    $tgtId   = [int]$path.tgt.id                   # matches UID in registry (cast to int to match map keys)
+    $rN      = $path.tgt.refresh.N
+    $rD      = $path.tgt.refresh.D
+    $refresh = if ($rD -gt 0) { [math]::Round($rN / $rD) } else { 0 }
+
+    $name = if ($uidNameMap.ContainsKey($tgtId)) { $uidNameMap[$tgtId] } else { "" }
+
+    $screen = $screens | Select-Object -Index $srcIdx
+    if (-not $screen) { continue }
+    $primary = if ($screen.Primary) { "1" } else { "0" }
+    $w = $screen.Bounds.Width
+    $h = $screen.Bounds.Height
+
+    Write-Output "$primary|$name|$w|$h|$refresh"
 }
 "#;
 
-    let output = match Command::new("powershell")
-        .args(["-NoProfile", "-Command", script])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return vec![],
+    let output = {
+        // Write to a temp .ps1 file — complex scripts with nested here-strings
+        // are unreliable when passed via -Command
+        use std::fs;
+        let tmp = std::env::temp_dir().join("textspec_display.ps1");
+        if fs::write(&tmp, script).is_err() { return vec![]; }
+        let result = Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                   tmp.to_str().unwrap_or("")])
+            .output();
+        let _ = fs::remove_file(&tmp);
+        match result {
+            Ok(o) => o,
+            Err(_) => return vec![],
+        }
     };
 
     let text = String::from_utf8(output.stdout).unwrap_or_default();
@@ -86,6 +121,8 @@ while ($true) {
         let w: u32 = parts[2].parse().unwrap_or(0);
         let h: u32 = parts[3].parse().unwrap_or(0);
         let refresh: f64 = parts[4].parse().unwrap_or(0.0);
+
+        if w == 0 { continue; }
 
         displays.push(DisplayInfo {
             name: if name.is_empty() { None } else { Some(name) },

@@ -30,72 +30,71 @@ fn enrich_platform(devices: &mut Vec<StorageDevice>) {
     use serde::Deserialize;
 
     #[derive(Deserialize, Debug)]
-    #[serde(rename = "Win32_DiskDrive")]
+    #[serde(rename = "MSFT_PhysicalDisk")]
     #[serde(rename_all = "PascalCase")]
-    struct Win32DiskDrive {
-        model: Option<String>,
-        size: Option<u64>,          // bytes
-        interface_type: Option<String>, // "IDE", "SCSI", "USB", "NVMe" etc.
-        media_type: Option<String>,
+    struct MsftPhysicalDisk {
+        friendly_name: Option<String>,
+        size: Option<u64>,
+        media_type: Option<u16>,  // 0=Unspecified, 3=HDD, 4=SSD, 5=SCM
+        bus_type: Option<u16>,    // 3=ATA, 11=SATA, 17=NVMe, 7=USB, 9=SD, etc.
     }
 
     let com = match COMLibrary::new() {
         Ok(c) => c,
         Err(_) => return,
     };
-    let wmi = match WMIConnection::new(com) {
+    // MSFT_PhysicalDisk lives in a different namespace than Win32
+    let wmi = match WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage", com) {
         Ok(w) => w,
         Err(_) => return,
     };
-    let results: Vec<Win32DiskDrive> = match wmi.query() {
+    let results: Vec<MsftPhysicalDisk> = match wmi.query() {
         Ok(r) => r,
         Err(_) => return,
     };
 
-    // Replace sysinfo's partition-based list with actual physical drives
     devices.clear();
     for disk in results {
-        let model = disk.model.unwrap_or_default().trim().to_string();
+        let model = disk.friendly_name.unwrap_or_default().trim().to_string();
         if model.is_empty() { continue; }
 
         let capacity_gb = disk.size.unwrap_or(0) as f64 / 1_073_741_824.0;
-        let iface = disk.interface_type.as_deref().unwrap_or("").to_uppercase();
-        let media = disk.media_type.as_deref().unwrap_or("").to_lowercase();
 
-        let device_type = classify_drive(&model, &iface, &media);
+        // BusType is the authoritative interface signal
+        let bus_type = disk.bus_type.unwrap_or(0);
+        let media_type = disk.media_type.unwrap_or(0);
+
+        let device_type = match (media_type, bus_type) {
+            (_, 17) => StorageType::NvmeSsd,          // BusType NVMe
+            (4, _)  => StorageType::SataSsd,           // MediaType SSD, non-NVMe bus
+            (3, _)  => StorageType::Hdd,               // MediaType HDD
+            (_, 7)  => StorageType::Unknown,           // USB — skip classifying
+            _       => StorageType::Unknown,
+        };
+
+        // Convert bus type number to a clean label — only show if meaningful
+        let interface = bus_type_label(bus_type);
 
         devices.push(StorageDevice {
             model,
             capacity_gb,
             device_type,
-            interface: Some(iface),
+            interface,
         });
     }
 }
 
 #[cfg(target_os = "windows")]
-fn classify_drive(model: &str, iface: &str, media: &str) -> StorageType {
-    let m = model.to_lowercase();
-    let i = iface.to_uppercase();
-    // NVMe: explicit interface, or model name contains nvme/pcie indicators
-    if i == "NVME" || m.contains("nvme") || m.contains("ssdpeknw") || m.contains("ssdpeknu") {
-        return StorageType::NvmeSsd;
+fn bus_type_label(bus_type: u16) -> Option<String> {
+    match bus_type {
+        3  => Some("ATA".into()),
+        11 => Some("SATA".into()),
+        17 => Some("NVMe".into()),
+        7  => Some("USB".into()),
+        9  => Some("SD".into()),
+        15 => Some("MMC".into()),
+        _  => None,   // Don't show confusing labels like SCSI/IDE
     }
-    // Common NVMe model patterns from known brands
-    // Samsung 9xx/8xx/7xx Pro/Evo NVMe, WD Black/Blue SN series, Sabrent Rocket, etc.
-    if m.contains("mz-v") || m.contains(" sn") || m.contains("rocket") 
-       || m.contains("shpp") || m.contains("firecuda") {
-        return StorageType::NvmeSsd;
-    }
-    // Rotational = HDD
-    if media.contains("removable") || m.contains("hdwg") || m.contains("hd") && !m.contains("ssd") {
-        return StorageType::Hdd;
-    }
-    // Everything else fixed is SATA SSD
-    if media.contains("fixed") {
-        return StorageType::SataSsd;
-    }
-    StorageType::Unknown
 }
 
 #[cfg(target_os = "linux")]

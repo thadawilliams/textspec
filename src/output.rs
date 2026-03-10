@@ -53,19 +53,26 @@ pub fn format_snapshot(snap: &SystemSnapshot) -> String {
 
         for stick in &snap.ram {
             let slot = stick.slot.as_deref().unwrap_or("?");
-            let mfr = stick.manufacturer.as_deref().unwrap_or("Unknown");
+            let mfr = stick.manufacturer.as_deref().unwrap_or("");
             let part = stick.part_number.as_deref().unwrap_or("");
             let mem_type = stick.memory_type.as_deref().unwrap_or("DDR");
             let speed = stick.speed_mhz.map(|s| format!(" @ {}MHz", s)).unwrap_or_default();
             let timings = format_timings(stick);
 
+            // Build the identifier — part number if we have it, manufacturer if we have it
+            let ident = match (mfr, part) {
+                ("", "") => String::new(),
+                ("", p)  => format!(" {}", p),
+                (m, "")  => format!(" {}", m),
+                (m, p)   => format!(" {} {}", m, p),
+            };
+
             out.push_str(&format!(
-                "  Slot {}: {} {} {} {}{}{}\n",
+                "  Slot {}: {} {}{}{}{}\n",
                 slot,
                 format_ram_size(stick.capacity_mb),
                 mem_type,
-                mfr,
-                part,
+                ident,
                 speed,
                 timings,
             ));
@@ -133,12 +140,13 @@ pub fn format_snapshot(snap: &SystemSnapshot) -> String {
             let kind = match device.device_type {
                 StorageType::NvmeSsd => "NVMe SSD",
                 StorageType::SataSsd => "SATA SSD",
-                StorageType::Hdd => "HDD",
+                StorageType::Hdd     => "HDD",
                 StorageType::Unknown => "Storage",
             };
-            let iface = device
-                .interface
-                .as_deref()
+            // Only show interface label when it adds info beyond the type
+            // e.g. show USB, ATA — skip NVMe/SATA since the type already says that
+            let iface = device.interface.as_deref()
+                .filter(|i| !matches!(*i, "NVMe" | "SATA" | "SCSI" | "IDE"))
                 .map(|i| format!(" [{}]", i))
                 .unwrap_or_default();
             out.push_str(&format!(

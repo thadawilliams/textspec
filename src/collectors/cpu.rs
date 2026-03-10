@@ -13,77 +13,53 @@ pub fn collect(sys: &System) -> Option<CpuInfo> {
         return None;
     }
 
-    // sysinfo reports logical processors; physical core count needs platform call
     let threads = cpus.len() as u32;
     let cores = get_physical_cores().unwrap_or(threads / 2);
     let base_clock_mhz = first.frequency() as f64;
+    let boost_clock_mhz = get_boost_clock()
+        .filter(|&boost| boost > base_clock_mhz + 100.0); // only show if meaningfully higher
 
     Some(CpuInfo {
         brand,
         cores,
         threads,
         base_clock_mhz,
-        boost_clock_mhz: get_boost_clock(),
+        boost_clock_mhz,
         cache_l2_kb: get_l2_cache_kb(),
         cache_l3_kb: get_l3_cache_kb(),
     })
 }
 
-// ── Platform-specific implementations ────────────────────────────────────────
+// ── Windows ───────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
 fn get_physical_cores() -> Option<u32> {
-    // WMI: SELECT NumberOfCores FROM Win32_Processor
-    // Placeholder until wmi crate integration is wired up
-    None
+    use wmi::{COMLibrary, WMIConnection};
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(rename = "Win32_Processor")]
+    #[serde(rename_all = "PascalCase")]
+    struct Win32Processor { number_of_cores: Option<u32> }
+    let com = COMLibrary::new().ok()?;
+    let wmi = WMIConnection::new(com).ok()?;
+    let results: Vec<Win32Processor> = wmi.query().ok()?;
+    results.into_iter().next()?.number_of_cores
 }
 
-#[cfg(target_os = "linux")]
-fn get_physical_cores() -> Option<u32> {
-    // Parse /proc/cpuinfo for "cpu cores" field
-    use std::fs;
-    let content = fs::read_to_string("/proc/cpuinfo").ok()?;
-    for line in content.lines() {
-        if line.starts_with("cpu cores") {
-            let val = line.split(':').nth(1)?.trim().parse().ok()?;
-            return Some(val);
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "macos")]
-fn get_physical_cores() -> Option<u32> {
-    // sysctl -n hw.physicalcpu
-    let output = std::process::Command::new("sysctl")
-        .args(["-n", "hw.physicalcpu"])
-        .output()
-        .ok()?;
-    String::from_utf8(output.stdout).ok()?.trim().parse().ok()
-}
-
-// Boost clock — Windows via WMI MaxClockSpeed, others via sysctl/cpufreq
 #[cfg(target_os = "windows")]
 fn get_boost_clock() -> Option<f64> {
-    // WMI: SELECT MaxClockSpeed FROM Win32_Processor
-    None // TODO: wire up WMI
+    use wmi::{COMLibrary, WMIConnection};
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(rename = "Win32_Processor")]
+    #[serde(rename_all = "PascalCase")]
+    struct Win32Processor { max_clock_speed: Option<u32> }
+    let com = COMLibrary::new().ok()?;
+    let wmi = WMIConnection::new(com).ok()?;
+    let results: Vec<Win32Processor> = wmi.query().ok()?;
+    results.into_iter().next()?.max_clock_speed.map(|s| s as f64)
 }
 
-#[cfg(target_os = "linux")]
-fn get_boost_clock() -> Option<f64> {
-    use std::fs;
-    // Try cpufreq scaling_max_freq
-    let path = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq";
-    let val: u64 = fs::read_to_string(path).ok()?.trim().parse().ok()?;
-    Some(val as f64 / 1000.0) // kHz → MHz
-}
-
-#[cfg(target_os = "macos")]
-fn get_boost_clock() -> Option<f64> {
-    None // macOS doesn't expose boost clock easily
-}
-
-// Cache sizes — platform specific
 #[cfg(target_os = "windows")]
 fn get_l2_cache_kb() -> Option<u64> {
     use wmi::{COMLibrary, WMIConnection};
@@ -112,17 +88,40 @@ fn get_l3_cache_kb() -> Option<u64> {
     results.into_iter().next()?.l3_cache_size.map(|v| v as u64)
 }
 
+// ── Linux ─────────────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+fn get_physical_cores() -> Option<u32> {
+    use std::fs;
+    let content = fs::read_to_string("/proc/cpuinfo").ok()?;
+    for line in content.lines() {
+        if line.starts_with("cpu cores") {
+            return line.split(':').nth(1)?.trim().parse().ok();
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn get_boost_clock() -> Option<f64> {
+    use std::fs;
+    // cpufreq scaling_max_freq is governor-capped, not hardware boost spec.
+    // Better: /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq
+    let path = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq";
+    let val: u64 = fs::read_to_string(path).ok()?.trim().parse().ok()?;
+    Some(val as f64 / 1000.0) // kHz → MHz
+}
+
+#[cfg(target_os = "linux")]
+fn get_l2_cache_kb() -> Option<u64> {
+    read_cache_size_linux("index2")
+}
+
 #[cfg(target_os = "linux")]
 fn get_l3_cache_kb() -> Option<u64> {
     read_cache_size_linux("index3")
 }
 
-#[cfg(target_os = "macos")]
-fn get_l3_cache_kb() -> Option<u64> {
-    sysctl_cache_mac("hw.l3cachesize")
-}
-
-// ── Linux helpers ─────────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
 fn read_cache_size_linux(index: &str) -> Option<u64> {
     use std::fs;
@@ -139,13 +138,36 @@ fn read_cache_size_linux(index: &str) -> Option<u64> {
     }
 }
 
-// ── macOS helpers ─────────────────────────────────────────────────────────────
+// ── macOS ─────────────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "macos")]
+fn get_physical_cores() -> Option<u32> {
+    let output = std::process::Command::new("sysctl")
+        .args(["-n", "hw.physicalcpu"])
+        .output().ok()?;
+    String::from_utf8(output.stdout).ok()?.trim().parse().ok()
+}
+
+#[cfg(target_os = "macos")]
+fn get_boost_clock() -> Option<f64> {
+    None // macOS does not expose boost clock via public API
+}
+
+#[cfg(target_os = "macos")]
+fn get_l2_cache_kb() -> Option<u64> {
+    sysctl_cache_mac("hw.l2cachesize")
+}
+
+#[cfg(target_os = "macos")]
+fn get_l3_cache_kb() -> Option<u64> {
+    sysctl_cache_mac("hw.l3cachesize")
+}
+
 #[cfg(target_os = "macos")]
 fn sysctl_cache_mac(key: &str) -> Option<u64> {
     let output = std::process::Command::new("sysctl")
         .args(["-n", key])
-        .output()
-        .ok()?;
+        .output().ok()?;
     let bytes: u64 = String::from_utf8(output.stdout).ok()?.trim().parse().ok()?;
     Some(bytes / 1024) // bytes → KB
 }
