@@ -50,14 +50,32 @@ fn collect_platform() -> Vec<GpuInfo> {
             })
             .map(|(_, mb)| *mb);
 
+        let vram_total_mb = vram_mb.map(round_to_standard_vram_mb);
+
         Some(GpuInfo {
             name,
             vram_mb,
+            vram_total_mb,
             driver_version: r.driver_version,
             is_integrated,
             shared_memory_mb: None,
         })
     }).collect()
+}
+
+#[cfg(target_os = "windows")]
+fn round_to_standard_vram_mb(usable_mb: u64) -> u64 {
+    // Standard discrete GPU VRAM sizes in MB
+    const STANDARD: &[u64] = &[512, 1024, 2048, 3072, 4096, 6144, 8192,
+                                10240, 12288, 16384, 20480, 24576, 32768, 49152];
+    // Find the smallest standard size >= usable (within 10% tolerance for firmware reservation)
+    for &s in STANDARD {
+        if usable_mb <= s && (s - usable_mb) * 100 / s <= 10 {
+            return s;
+        }
+    }
+    // If nothing fits cleanly, just round up to next GB
+    ((usable_mb + 1023) / 1024) * 1024
 }
 
 /// Query DXGI for accurate VRAM — returns Vec of (adapter_name, vram_mb)

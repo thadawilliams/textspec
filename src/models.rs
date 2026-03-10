@@ -50,11 +50,11 @@ pub struct RamStick {
 
 #[derive(Debug, Default)]
 pub struct GpuInfo {
-    pub name: String,           // e.g. "AMD Radeon RX 9060 XT"
-    pub vram_mb: Option<u64>,
+    pub name: String,               // e.g. "AMD Radeon RX 9060 XT"
+    pub vram_mb: Option<u64>,       // usable VRAM as reported by DXGI
+    pub vram_total_mb: Option<u64>, // rounded to nearest standard card size
     pub driver_version: Option<String>,
     pub is_integrated: bool,
-    // Integrated GPU specific
     pub shared_memory_mb: Option<u64>,
 }
 

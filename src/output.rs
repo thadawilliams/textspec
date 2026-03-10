@@ -88,8 +88,15 @@ pub fn format_snapshot(snap: &SystemSnapshot) -> String {
         out.push_str("[ GPU ]\n");
         for gpu in &discrete {
             out.push_str(&format!("  {}\n", gpu.name));
-            if let Some(vram) = gpu.vram_mb {
-                out.push_str(&format!("  VRAM: {}\n", format_ram_size(vram)));
+            match (gpu.vram_total_mb, gpu.vram_mb) {
+                (Some(total), Some(usable)) if total != usable => {
+                    out.push_str(&format!("  VRAM: {} ({} usable)\n",
+                        format_ram_size(total), format_ram_size(usable)));
+                }
+                (_, Some(usable)) => {
+                    out.push_str(&format!("  VRAM: {}\n", format_ram_size(usable)));
+                }
+                _ => {}
             }
             if let Some(driver) = &gpu.driver_version {
                 out.push_str(&format!("  Driver: {}\n", driver));
