@@ -10,6 +10,7 @@ pub struct SystemSnapshot {
     pub gpus: Vec<GpuInfo>,
     pub displays: Vec<DisplayInfo>,
     pub storage: Vec<StorageDevice>,
+    pub peripherals: Vec<PeripheralDevice>,
     pub os: Option<OsInfo>,
 }
 
@@ -88,4 +89,21 @@ pub enum StorageType {
 pub struct OsInfo {
     pub name: String,           // e.g. "Windows 11 Pro"
     pub build: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct PeripheralDevice {
+    pub name: String,
+    pub manufacturer: Option<String>,
+    pub kind: PeripheralKind,
+    pub device_id_root: String,
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub enum PeripheralKind {
+    Audio,
+    Keyboard,
+    Mouse,
+    #[default]
+    Other,
 }

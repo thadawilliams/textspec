@@ -164,6 +164,32 @@ pub fn format_snapshot(snap: &SystemSnapshot) -> String {
         out.push('\n');
     }
 
+    // Peripherals
+    if !snap.peripherals.is_empty() {
+        out.push_str("[ PERIPHERALS ]\n");
+        for p in &snap.peripherals {
+            // Skip manufacturers that are generic placeholders
+            // "(Generic USB Audio)" — parenthesized generics
+            // "Microsoft" — Windows registers itself as manufacturer for Bluetooth devices
+            let mfr = p.manufacturer.as_deref()
+                .filter(|m| !m.starts_with('(') && !m.ends_with(')'))
+                .filter(|m| !m.eq_ignore_ascii_case("microsoft"))
+                .unwrap_or("");
+            // Strip possessive personal name prefix from Bluetooth devices
+            // e.g. "Thad's Beats Studio Buds" → "Beats Studio Buds"
+            let display_name = strip_possessive(&p.name);
+
+            // Don't repeat manufacturer if it's already in the name
+            let label = if !mfr.is_empty() && !display_name.to_lowercase().contains(&mfr.to_lowercase()) {
+                format!("{} {}", mfr, display_name)
+            } else {
+                display_name.to_string()
+            };
+            out.push_str(&format!("  {}\n", label));
+        }
+        out.push('\n');
+    }
+
     out.push_str("===================\n");
     out
 }
@@ -192,4 +218,22 @@ fn format_timings(stick: &RamStick) -> String {
         (Some(cl), _, _, _) => format!(" CL{}", cl),
         _ => String::new(),
     }
+}
+
+fn strip_possessive(name: &str) -> &str {
+    // Strip personal name prefixes like "Thad's ", "John's ", "Sarah's "
+    // Pattern: one word ending in 's followed by a space
+    let bytes = name.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b' ' && i >= 2 {
+            let prefix = &name[..i];
+            if prefix.ends_with("'s") || prefix.ends_with("\u{2019}s") {
+                // Make sure the prefix is a single word (no spaces)
+                if !prefix.contains(' ') {
+                    return &name[i + 1..];
+                }
+            }
+        }
+    }
+    name
 }

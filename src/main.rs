@@ -5,9 +5,11 @@ mod collectors;
 use clap::Parser;
 use sysinfo::System;
 use models::SystemSnapshot;
+use std::time::Instant;
 
 #[derive(Parser)]
-#[command(name = "specsnap")]
+#[command(name = "textspec")]
+#[command(version)]
 #[command(about = "Clean hardware spec snapshot for posting anywhere", long_about = None)]
 struct Cli {
     /// Copy output to clipboard automatically
@@ -22,7 +24,8 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
 
-    println!("Collecting system information...");
+    let start = Instant::now();
+    eprint!("Collecting system information...");
 
     let mut sys = System::new_all();
     sys.refresh_all();
@@ -34,16 +37,20 @@ fn main() {
         gpus:        collectors::gpu::collect(&sys),
         displays:    collectors::display::collect(),
         storage:     collectors::storage::collect(&sys),
+        peripherals: collectors::peripherals::collect(),
         os:          collectors::os::collect(&sys),
     };
 
+    let elapsed = start.elapsed();
+    eprintln!(" done ({:.1}s)", elapsed.as_secs_f32());
+
     let text = output::format_snapshot(&snapshot);
 
-    println!("\n{}", text);
+    println!("{}", text);
 
     if let Some(path) = cli.output {
         match std::fs::write(&path, &text) {
-            Ok(_) => println!("Saved to {}", path),
+            Ok(_) => eprintln!("Saved to {}", path),
             Err(e) => eprintln!("Failed to write file: {}", e),
         }
     }
@@ -54,8 +61,6 @@ fn main() {
 }
 
 fn copy_to_clipboard(text: &str) {
-    // Cross-platform clipboard via OS commands
-    // A proper solution would use the `arboard` crate
     #[cfg(target_os = "windows")]
     {
         use std::process::{Command, Stdio};
@@ -65,14 +70,13 @@ fn copy_to_clipboard(text: &str) {
                 let _ = stdin.write_all(text.as_bytes());
             }
             let _ = child.wait();
-            println!("Copied to clipboard.");
+            eprintln!("Copied to clipboard.");
         }
     }
     #[cfg(target_os = "linux")]
     {
         use std::process::{Command, Stdio};
         use std::io::Write;
-        // Try xclip then xsel
         for cmd in &["xclip -selection clipboard", "xsel --clipboard --input"] {
             let parts: Vec<&str> = cmd.split_whitespace().collect();
             if let Ok(mut child) = Command::new(parts[0]).args(&parts[1..]).stdin(Stdio::piped()).spawn() {
@@ -80,7 +84,7 @@ fn copy_to_clipboard(text: &str) {
                     let _ = stdin.write_all(text.as_bytes());
                 }
                 if child.wait().map(|s| s.success()).unwrap_or(false) {
-                    println!("Copied to clipboard.");
+                    eprintln!("Copied to clipboard.");
                     return;
                 }
             }
@@ -96,7 +100,7 @@ fn copy_to_clipboard(text: &str) {
                 let _ = stdin.write_all(text.as_bytes());
             }
             let _ = child.wait();
-            println!("Copied to clipboard.");
+            eprintln!("Copied to clipboard.");
         }
     }
 }
