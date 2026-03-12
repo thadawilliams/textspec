@@ -10,7 +10,7 @@ No installation. No dependencies. Just download and run.
 
 ## Download
 
-Go to the [Releases](../../releases) page, expand assets at the bottom page, and download the latest binary for your platform:
+Go to the [Releases](../../releases) page, expand assets at the bottom of the page, and download the latest binary for your platform:
 
 | Platform | File |
 |---|---|
