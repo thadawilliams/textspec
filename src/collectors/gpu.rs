@@ -75,7 +75,7 @@ fn round_to_standard_vram_mb(usable_mb: u64) -> u64 {
         }
     }
     // If nothing fits cleanly, just round up to next GB
-    ((usable_mb + 1023) / 1024) * 1024
+    usable_mb.div_ceil(1024) * 1024
 }
 
 /// Query DXGI for accurate VRAM — returns Vec of (adapter_name, vram_mb)
@@ -105,7 +105,7 @@ fn get_dxgi_vram() -> Vec<(String, u64)> {
 
         // Description is a null-terminated UTF-16 array
         let name_utf16: Vec<u16> = desc.Description.iter()
-            .map(|&c| c as u16)
+            .copied()
             .take_while(|&c| c != 0)
             .collect();
         let name = String::from_utf16_lossy(&name_utf16);
