@@ -10,7 +10,7 @@ No installation. No dependencies. Just download and run.
 
 ## Download
 
-Go to the [Releases](../../releases) page and download the latest binary for your platform:
+Go to the [Releases](../../releases) page, expand assets at the bottom of the page, and download the latest binary for your platform:
 
 | Platform | File |
 |---|---|
@@ -23,7 +23,7 @@ Go to the [Releases](../../releases) page and download the latest binary for you
 ## Usage
 
 ### Double-click
-Just double-click `textspec-windows-x86_64.exe`. A window will open, collect your specs, display them, and wait for you to press Enter before closing.
+Just double-click `textspec-windows-x86_64.exe`. A window will open, collect your specs, display them, allowing you to copy them, and wait for you to press Enter before closing.
 
 ### From the command line
 ```
