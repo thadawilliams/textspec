@@ -125,6 +125,20 @@ textspec-windows-x86_64.exe --version
 
 ---
 
+## Security
+
+textspec has been audited with the following tools:
+
+- **cargo audit** — 94 dependencies scanned, 0 known vulnerabilities
+- **cargo clippy** — 0 warnings
+- **cargo deny** — all dependency licenses verified (MIT / Apache-2.0), 0 advisories
+- **GitHub CodeQL** — static analysis runs automatically on every push
+- **GitHub Dependabot** — monitors dependencies continuously for new vulnerabilities
+
+textspec makes no network connections. All queries are read-only system calls. The only file written to disk is the optional `--output` file you explicitly request.
+
+---
+
 ## Feedback
 
 Found a bug or have a suggestion? Open an issue on the [Issues](../../issues) page. If a device isn't being detected correctly, include the output of:

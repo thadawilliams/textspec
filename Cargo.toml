@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Clean hardware spec snapshot for sharing"
 authors = ["Thad Williams"]
+license = "MIT"
 
 [[bin]]
 name = "textspec"
